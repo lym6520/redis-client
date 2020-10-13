@@ -14,18 +14,9 @@ import org.slf4j.LoggerFactory;
 import cjl.redis_client.excep.NotSupportedException;
 import cjl.redis_client.strategy.HashShardingStrategy;
 import cjl.redis_client.strategy.ShardingStrategy;
+import redis.clients.jedis.*;
 import redis.clients.jedis.BinaryClient.LIST_POSITION;
-import redis.clients.jedis.BitOP;
-import redis.clients.jedis.BitPosParams;
-import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisCluster.Reset;
-import redis.clients.jedis.JedisPubSub;
-import redis.clients.jedis.ScanParams;
-import redis.clients.jedis.ScanResult;
-import redis.clients.jedis.SortingParams;
-import redis.clients.jedis.Transaction;
-import redis.clients.jedis.Tuple;
-import redis.clients.jedis.ZParams;
 import redis.clients.util.Pool;
 import redis.clients.util.Slowlog;
 
@@ -36,20 +27,23 @@ public class Redic extends Jedis {
 
 	private ShardingStrategy shardingStategy = new HashShardingStrategy();
 
-	private boolean readWriteSeparate = false;
+	private boolean readWriteSeparate = true;
 
 	private List<Map> nodeConns;
+
+	private JedisPoolConfig config;
 
 	public Redic() {
 	}
 
-	public Redic(List<Map> nodeConns) {
+	public Redic(List<Map> nodeConns, JedisPoolConfig config) {
 		if (nodeConns == null || nodeConns.isEmpty()) {
 			log.error("The nodeConns {} for Redic is invalid.", nodeConns);
 			throw new IllegalArgumentException("The nodeConnStrs for Redic is invalid.");
 		}
 
 		this.nodeConns = nodeConns;
+		this.config = config;
 		init();
 	}
 
@@ -63,10 +57,16 @@ public class Redic extends Jedis {
 	public void addNode(Map nodeConnMap) {
 		
 		String masterName = (String)nodeConnMap.get("master");
+		String password = (String)nodeConnMap.get("password");
+		String timeout = (String)nodeConnMap.get("timeout");
+		int t = 5000;
+		if(timeout != null && !"".equals(timeout)){
+			t = Integer.parseInt(timeout);
+		}
 		
 		List<String> sentinels = (List<String>)nodeConnMap.get("sentinels");
 
-		redicNodes.add(new RedicNode(masterName, sentinels, new GenericObjectPoolConfig(), 5, null));
+		redicNodes.add(new RedicNode(masterName, sentinels,t, password ,this.config, 5, null));
 	}
 
 	protected <T> Jedis getWrite(T key) {
@@ -83,10 +83,18 @@ public class Redic extends Jedis {
 		int nodeIndex = shardingStategy.key2node(key, redicNodes.size());
 		RedicNode redicNode = redicNodes.get(nodeIndex);
 
-		if (!readWriteSeparate)
+		if (!readWriteSeparate){
 			jedis =  redicNode.getMaster().getResource();
+		}else{
+			if(redicNode.getSlaves().size() == 0){
+				//不存在从服务器的情况下，取主服务器的
+				log.warn("redis 从 master get 资源");
+				jedis =  redicNode.getMaster().getResource();
+			}else{
+				jedis = redicNode.getRoundRobinSlaveRedicNode().getResource();
+			}
 
-		jedis = redicNode.getRoundRobinSlaveRedicNode().getResource();
+		}
 		
 		return jedis;
 	}
@@ -103,10 +111,16 @@ public class Redic extends Jedis {
 	@Override
 	public String set(String key, String value, String nxxx, String expx,
 			long time) {
-		Jedis jedis = getWrite(key);
-		String ret = jedis.set(key, value, nxxx, expx, time);
-		jedis.close();
-
+		String ret = null;
+		Jedis jedis = null;
+		try {
+			jedis = getWrite(key);
+			ret = jedis.set(key, value, nxxx, expx, time);
+		}finally {
+			if(jedis != null){
+				jedis.close();
+			}
+		}
 		return ret;
 	}
 
@@ -114,13 +128,14 @@ public class Redic extends Jedis {
 	public String get(String key) {
 		
 		String ret = null;
-		
+		Jedis jedis = null;
 		try {
-			Jedis jedis = getRead(key);
+			jedis = getRead(key);
 			ret = jedis.get(key);
-			jedis.close();
 		} catch (Exception e) {
 			e.printStackTrace();
+		}finally {
+			jedis.close();
 		}
 
 		return ret;

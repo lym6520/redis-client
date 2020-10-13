@@ -63,14 +63,14 @@ public class RedicNode {
 
 	
     public RedicNode(String masterName, List<String> sentinels,
-            final GenericObjectPoolConfig poolConfig,int retrySentinel,SelectStrategy selectStrategy) {
+                     int timeout,String password,final GenericObjectPoolConfig poolConfig,int retrySentinel,SelectStrategy selectStrategy) {
         this.poolConfig = poolConfig;
         this.retrySentinel = retrySentinel;
         this.masterListeners = new HashSet<MasterListener>(sentinels.size());
 
-        Map result = initSentinels(sentinels, masterName);
-        initMasterPool((HostAndPort)result.get("master"));
-        initSlavePools((List<HostAndPort>)result.get("slaves"));
+        Map result = initSentinels(sentinels, masterName,timeout, password);
+        initMasterPool((HostAndPort)result.get("master"),timeout, password);
+        initSlavePools((List<HostAndPort>)result.get("slaves"), timeout,password);
         
         this.selectStrategy = selectStrategy==null?new RoundRobinSelectStrategy():selectStrategy;
     }
@@ -98,15 +98,20 @@ public class RedicNode {
 	}
 	
 	
-    private void initMasterPool(HostAndPort newMasterRoute) {
+    private void initMasterPool(HostAndPort newMasterRoute, int timeout,String password) {
         if (newMasterRoute != null && !newMasterRoute.equals(this.localMasterRoute)) {
-        	this.master = new JedisPool(this.poolConfig,
-        			newMasterRoute.getHost(), newMasterRoute.getPort());
+            if(password != null && !"".equals(password)){
+        	    this.master = new JedisPool(this.poolConfig,
+        			newMasterRoute.getHost(), newMasterRoute.getPort(), timeout, password);
+            }else{
+                this.master = new JedisPool(this.poolConfig,
+                        newMasterRoute.getHost(), newMasterRoute.getPort(), timeout);
+            }
         	localMasterRoute = newMasterRoute;
         }
     }
 	
-    private void initSlavePools(List<HostAndPort> newSlaves) {
+    private void initSlavePools(List<HostAndPort> newSlaves, int timeout,String password) {
     	
     	log.info("begin to initialize slave pool");
     	
@@ -115,10 +120,15 @@ public class RedicNode {
     	}
     	
     	for(HostAndPort hap : newSlaves) {
-    		JedisPool slave = new JedisPool(this.poolConfig, hap.getHost(), hap.getPort());
-    		slaves.add(slave);
-    		
-    		slavePools.put(hap.getHost()+":"+hap.getPort(), slave);
+            if(password != null && !"".equals(password)){
+                JedisPool slave = new JedisPool(this.poolConfig, hap.getHost(), hap.getPort(),timeout, password);
+                slaves.add(slave);
+                slavePools.put(hap.getHost()+":"+hap.getPort(), slave);
+            }else{
+                JedisPool slave = new JedisPool(this.poolConfig, hap.getHost(), hap.getPort(),timeout, password);
+                slaves.add(slave);
+                slavePools.put(hap.getHost()+":"+hap.getPort(), slave);
+            }
     	}
     	
     	log.info("initialize slave pool ready");
@@ -132,7 +142,7 @@ public class RedicNode {
      * @param masters
      * @return
      */
-    private Map<String, HostAndPort> initSentinels(List<String> sentinels, String masterName) {
+    private Map<String, HostAndPort> initSentinels(List<String> sentinels, String masterName, int timeout, String password) {
 
         log.info("Trying to find all master from available Sentinels...");
 
@@ -229,14 +239,14 @@ public class RedicNode {
         for (String sentinel : sentinels) {
             final HostAndPort hap = toHostAndPort(Arrays.asList(sentinel.split(":")));
             MasterListener masterListener = new MasterListener(masterName, hap.getHost(),
-                    hap.getPort());
+                    hap.getPort(), timeout, password);
             // whether MasterListener threads are alive or not, process can be stopped
             masterListener.setDaemon(true);
             masterListeners.add(masterListener);
             masterListener.start();
         }
         
-        SlaveListener slaveListener = new SlaveListener(masterName,sentinels);
+        SlaveListener slaveListener = new SlaveListener(masterName,sentinels, timeout, password);
         slaveListener.setDaemon(true);
         slaveListener.start();
         
@@ -255,19 +265,23 @@ public class RedicNode {
 
         protected String masterName;
         protected List<String> sentinels;
+        protected int timeout = 5000;
+        protected String password;
         protected long waitTimeMillis = 5000;
         protected AtomicBoolean running = new AtomicBoolean(false);
 
         protected SlaveListener() {
         }
 
-        public SlaveListener(String masterName, List<String> sentinels) {
+        public SlaveListener(String masterName, List<String> sentinels, int timeout, String password) {
             this.masterName = masterName;
             this.sentinels = sentinels;
+            this.timeout = timeout;
+            this.password = password;
         }
 
-        public SlaveListener(String masterName, List<String> sentinels, long waitTimeMillis) {
-            this(masterName, sentinels);
+        public SlaveListener(String masterName, List<String> sentinels, int waitTimeMillis) {
+            this(masterName, sentinels, waitTimeMillis, "");
             this.waitTimeMillis = waitTimeMillis;
         }
 
@@ -357,8 +371,13 @@ public class RedicNode {
         		log.info("begin to rebuild slavePool !");
         		
             	for(String hap : news2) {
-            		JedisPool slave = new JedisPool(poolConfig, hap.split(":")[0], Integer.parseInt(hap.split(":")[1]));
-            		newPools.put(hap, slave);
+            	    if(password != null && !"".equals(password)){
+            		    JedisPool slave = new JedisPool(poolConfig, hap.split(":")[0], Integer.parseInt(hap.split(":")[1]), this.timeout, this.password);
+            		    newPools.put(hap, slave);
+            	    }else{
+                        JedisPool slave = new JedisPool(poolConfig, hap.split(":")[0], Integer.parseInt(hap.split(":")[1]), this.timeout);
+                        newPools.put(hap, slave);
+                    }
             	}
             	
             	slavePools.clear();
@@ -380,6 +399,8 @@ public class RedicNode {
         protected String masterName;
         protected String host;
         protected int port;
+        protected int timeout = 5000;
+        protected String password;
         protected long subscribeRetryWaitTimeMillis = 5000;
         protected volatile Jedis j;
         protected AtomicBoolean running = new AtomicBoolean(false);
@@ -387,16 +408,18 @@ public class RedicNode {
         protected MasterListener() {
         }
 
-        public MasterListener(String masterName, String host, int port) {
+        public MasterListener(String masterName, String host, int port, int timeout, String password) {
             super(String.format("MasterListener-%s-[%s:%d]", masterName, host, port));
             this.masterName = masterName;
             this.host = host;
             this.port = port;
+            this.timeout = timeout;
+            this.password = password;
         }
 
         public MasterListener(String masterName, String host, int port,
-                long subscribeRetryWaitTimeMillis) {
-            this(masterName, host, port);
+                int subscribeRetryWaitTimeMillis) {
+            this(masterName, host, port,subscribeRetryWaitTimeMillis,"");
             this.subscribeRetryWaitTimeMillis = subscribeRetryWaitTimeMillis;
         }
 
@@ -407,7 +430,7 @@ public class RedicNode {
                 try {
                     j = new Jedis(host, port);
                     // 订阅master变更消息
-                    j.subscribe(new MasterChengeProcessor(this.masterName, this.host, this.port),
+                    j.subscribe(new MasterChengeProcessor(this.masterName, this.host, this.port, timeout, password),
                             "+switch-master");
                 } catch (JedisConnectionException e) {
                     if (running.get()) {
@@ -450,17 +473,21 @@ public class RedicNode {
         protected String masterName;
         protected String host;
         protected int port;
+        protected int timeout;
+        protected String password;
 
         /**
          * @param masters
          * @param host
          * @param port
          */
-        public MasterChengeProcessor(String masterName, String host, int port) {
+        public MasterChengeProcessor(String masterName, String host, int port, int timeout, String password) {
             super();
             this.masterName = masterName;
             this.host = host;
             this.port = port;
+            this.timeout = timeout;
+            this.password = password;
         }
 
         /*
@@ -498,7 +525,7 @@ public class RedicNode {
                         // 防止二次更新
                         synchronized (MasterChengeProcessor.class) {
                             // 重新初始化pool
-                            initMasterPool(newHostMaster);
+                            initMasterPool(newHostMaster, timeout, password);
                         }
                     } else {
                         log.fine("Ignoring message on +switch-master for master name "
